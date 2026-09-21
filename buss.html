@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Buss i Sanntid & Busstopp – Tromsø</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body, html {
+      height: 100%;
+      width: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+    #map {
+      height: 100vh;
+      width: 100vw;
+    }
+    #info-panel {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.95);
+      padding: 14px 18px;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      max-width: 320px;
+      backdrop-filter: blur(4px);
+    }
+    #info-panel h1 {
+      font-size: 16px;
+      margin-bottom: 4px;
+      color: #111;
+    }
+    #info-panel p {
+      font-size: 13px;
+      color: #555;
+      line-height: 1.4;
+      margin-top: 4px;
+    }
+    /* Buss-ikon (rød sirkel med linjenummer) */
+    .bus-icon {
+      background: #e2001a;
+      color: #ffffff;
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      font-weight: 700;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+    }
+    /* Busstopp-ikon (liten blå prikk) */
+    .stop-icon {
+      background: #0066cc;
+      border: 1.5px solid #ffffff;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    .status-error {
+      color: #d32f2f;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="info-panel">
+    <h1>Buss i Sanntid – Tromsø</h1>
+    <p id="stop-status">Laster busstopp...</p>
+    <p id="bus-status">Kobler til sanntidsdata...</p>
+  </div>
+
+  <div id="map"></div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <script>
+    // 1. Initialiser kartet over Tromsø
+    const map = L.map('map').setView([69.6492, 18.9553], 13);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap | Data fra Entur'
+    }).addTo(map);
+
+    const busMarkers = {};
+    const stopMarkersLayer = L.layerGroup().addTo(map);
+
+    const VEHICLE_API = 'https://api.entur.io/realtime/v2/vehicles/graphql';
+    const JOURNEY_PLANNER_API = 'https://api.entur.io/journey-planner/v3/graphql';
+
+    // Utvidet geografisk boks for Tromsø (Tromsøya, Kvaløya, Fastlandet)
+    function erITromso(lat, lon) {
+      return lat >= 69.55 && lat <= 69.78 && lon >= 18.80 && lon <= 19.25;
+    }
+
+    // ==========================================
+    // 2. HENT OG VIS BUSSTOPP (JourneyPlanner API)
+    // ==========================================
+    async function hentBusstopp() {
+      const stopStatusEl = document.getElementById('stop-status');
+      
+      const query = `
+        {
+          stopPlaces(
+            box: {
+              minLatitude: 69.58
+              maxLatitude: 69.75
+              minLongitude: 18.85
+              maxLongitude: 19.15
+            }
+          ) {
+            id
+            name
+            location {
+              latitude
+              longitude
+            }
+          }
+        }
+      `;
+
+      try {
+        const response = await fetch(JOURNEY_PLANNER_API, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'ET-Client-Name': 'tromso-busskart-stops'
+          },
+          body: JSON.stringify({ query })
+        });
+
+        const json = await response.json();
+        const stops = json.data?.stopPlaces || [];
+
+        stops.forEach(stop => {
+          if (!stop.location) return;
+
+          const customIcon = L.divIcon({
+            className: 'stop-icon',
+            iconSize: [8, 8],
+            iconAnchor: [4, 4]
+          });
+
+          const marker = L.marker([stop.location.latitude, stop.location.longitude], { icon: customIcon })
+            .bindPopup(`<strong>Busstopp:</strong> ${stop.name}`);
+
+          stopMarkersLayer.addLayer(marker);
+        });
+
+        stopStatusEl.innerText = `Viser ${stops.length} busstopp i området.`;
+      } catch (err) {
+        console.error('Feil ved henting av busstopp:', err);
+        stopStatusEl.innerText = 'Kunne ikke laste busstopp.';
+      }
+    }
+
+    // ==========================================
+    // 3. HENT OG OPPDATER SANNTIDSBUSSER (Vehicle API)
+    // ==========================================
+    const vehicleQuery = `
+      {
+        vehicles {
+          vehicleId
+          delay
+          line {
+            publicCode
+            lineName
+          }
+          location {
+            latitude
+            longitude
+          }
+        }
+      }
+    `;
+
+    async function hentBusser() {
+      const busStatusEl = document.getElementById('bus-status');
+
+      try {
+        const response = await fetch(VEHICLE_API, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'ET-Client-Name': 'tromso-busskart-realtime'
+          },
+          body: JSON.stringify({ query: vehicleQuery })
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const json = await response.json();
+        const vehicles = json.data?.vehicles || [];
+
+        const tromsoBusses = [];
+
+        vehicles.forEach(bus => {
+          if (!bus.location || !bus.location.latitude || !bus.location.longitude) return;
+
+          const lat = bus.location.latitude;
+          const lon = bus.location.longitude;
+
+          // Filtrer til Tromsø-området
+          if (erITromso(lat, lon)) {
+            const lineCode = bus.line?.publicCode || 'Buss';
+            const lineName = bus.line?.lineName || 'Troms Fylkestrafikk';
+            const vehicleId = bus.vehicleId || `${lineCode}-${lat}-${lon}`;
+            const delayMin = bus.delay ? Math.round(bus.delay / 60) : 0;
+
+            tromsoBusses.push({
+              id: vehicleId,
+              lat: lat,
+              lon: lon,
+              line: lineCode,
+              name: lineName,
+              delay: delayMin
+            });
+          }
+        });
+
+        oppdaterBussKart(tromsoBusses);
+        busStatusEl.innerText = `Sist oppdatert: ${new Date().toLocaleTimeString()} (${tromsoBusses.length} aktive busser)`;
+
+      } catch (err) {
+        console.error('Feil ved henting av bussdata:', err);
+        busStatusEl.innerHTML = `<span class="status-error">Feil ved henting av sanntidsdata. Prøver igjen...</span>`;
+      }
+    }
+
+    function oppdaterBussKart(busses) {
+      const activeIds = new Set();
+
+      busses.forEach(bus => {
+        activeIds.add(bus.id);
+
+        const delayText = bus.delay > 0 
+          ? `<br><span style="color: #d32f2f;">+${bus.delay} min forsinket</span>` 
+          : (bus.delay < 0 ? `<br><span style="color: #2e7d32;">${Math.abs(bus.delay)} min foran rute</span>` : '<br>I rute');
+
+        const popupContent = `
+          <strong>Linje ${bus.line}</strong><br>
+          ${bus.name}
+          ${delayText}
+        `;
+
+        if (busMarkers[bus.id]) {
+          busMarkers[bus.id].setLatLng([bus.lat, bus.lon]);
+          busMarkers[bus.id].getPopup().setContent(popupContent);
+        } else {
+          const customIcon = L.divIcon({
+            className: 'bus-icon',
+            html: `<span>${bus.line}</span>`,
+            iconSize: [30, 30],
+            iconAnchor: [15, 15]
+          });
+
+          const marker = L.marker([bus.lat, bus.lon], { icon: customIcon })
+            .bindPopup(popupContent)
+            .addTo(map);
+
+          busMarkers[bus.id] = marker;
+        }
+      });
+
+      // Fjern busser som ikke lenger rapporteres
+      Object.keys(busMarkers).forEach(id => {
+        if (!activeIds.has(id)) {
+          map.removeLayer(busMarkers[id]);
+          delete busMarkers[id];
+        }
+      });
+    }
+
+    // Last inn busstopp én gang ved oppstart
+    hentBusstopp();
+
+    // Hent sanntidsbusser med en gang, og oppdater hvert 5. sekund
+    hentBusser();
+    setInterval(hentBusser, 5000);
+  </script>
+</body>
+</html>
