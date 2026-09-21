@@ -319,7 +319,7 @@
         <div id="map"></div>
         <div id="loading-status">
             <span class="spinner"></span>
-            <span id="loading-text">Leser inn spor...</span>
+            <span id="loading-text">Leser inn hovedspor...</span>
         </div>
     </div>
 
@@ -364,55 +364,52 @@
         const bounds = L.latLngBounds();
         const lagredeSpor = [];
 
-        // Henter toppene fra en JSON-fil (vinter_topper.json / sommer_topper.json)
         async function hentTopper(url, type) {
             try {
                 const response = await fetch(url);
                 if (!response.ok) return [];
-                const data = await response.json();
-                return data.map(topp => ({
-                    id: topp.id,
-                    navn: topp.navn,
-                    fil: topp.fil,
-                    ekstraSpor: topp.ekstraSpor || [],
-                    type: type
-                }));
+
+                if (url.endsWith('.json')) {
+                    const data = await response.json();
+                    return data.map(topp => ({
+                        navn: topp.navn,
+                        fil: topp.fil,
+                        type: type
+                    }));
+                }
+
+                const htmlText = await response.text();
+                const funneTopper = [];
+
+                const topperBlockMatch = htmlText.match(/(?:const|let|var)\s+\w*(?:topper|turer)\w*\s*=\s*(\[[\s\S]*?\]);/i);
+
+                if (topperBlockMatch && topperBlockMatch[1]) {
+                    const blockText = topperBlockMatch[1];
+                    const objectRegex = /\{[\s\S]*?\}/g;
+                    let objMatch;
+
+                    while ((objMatch = objectRegex.exec(blockText)) !== null) {
+                        const objStr = objMatch[0];
+                        const navnMatch = objStr.match(/(?:navn|tittel|title|name)\s*:\s*["']([^"']+)["']/i);
+                        const gpxMatch = objStr.match(/["']([^"']+\.gpx)["']/i);
+
+                        if (gpxMatch && gpxMatch[1]) {
+                            const filnavn = gpxMatch[1].split('/').pop().trim();
+                            const fjellNavn = navnMatch ? navnMatch[1].trim() : filnavn.replace('.gpx', '');
+
+                            if (!funneTopper.some(t => t.fil === filnavn)) {
+                                funneTopper.push({ navn: fjellNavn, fil: filnavn, type });
+                            }
+                        }
+                    }
+                }
+
+                return funneTopper;
+
             } catch (error) {
                 console.warn("Kunne ikke laste data fra " + url, error);
                 return [];
             }
-        }
-
-        // Lager en unik liste over alle GPX-spor (hovedspor + ekstraspor).
-        // Samme GPX-fil brukt av flere topper lastes kun én gang, men husker alle toppene den hører til.
-        function byggSporliste(topper) {
-            const sporMap = new Map();
-
-            const leggTil = (fil, type, eier) => {
-                if (!fil) return;
-                if (!sporMap.has(fil)) sporMap.set(fil, { fil: fil, type: type, eiere: [] });
-                const spor = sporMap.get(fil);
-                if (!spor.eiere.some(e => e.id === eier.id && e.type === eier.type && e.ekstraTittel === eier.ekstraTittel)) {
-                    spor.eiere.push(eier);
-                }
-            };
-
-            // Hovedspor først, så ekstraspor
-            topper.forEach(t => leggTil(t.fil, t.type, { id: t.id, navn: t.navn, type: t.type, ekstraTittel: null }));
-            topper.forEach(t => {
-                t.ekstraSpor.forEach(es => leggTil(es.fil, t.type, { id: t.id, navn: t.navn, type: t.type, ekstraTittel: es.tittel || null }));
-            });
-
-            return Array.from(sporMap.values());
-        }
-
-        function eierUrl(eier) {
-            const målside = eier.type === "sommer" ? "sommer.html" : "vinter.html";
-            return `${målside}?fjell=${encodeURIComponent(eier.id || eier.navn)}`;
-        }
-
-        function eierTittel(eier) {
-            return eier.ekstraTittel ? `${eier.navn} – ${eier.ekstraTittel}` : eier.navn;
         }
 
         function zoomTilAktiveSpor() {
@@ -433,7 +430,7 @@
             
             const statusText = document.getElementById('loading-text');
             if (statusText) {
-                statusText.textContent = `Laster inn spor... ${loadedCount}/${totalFiles}`;
+                statusText.textContent = `Laster inn hovedspor... ${loadedCount}/${totalFiles}`;
             }
 
             if (loadedCount >= totalFiles) {
@@ -448,7 +445,7 @@
         }
 
         // Hjelpefunksjon for å laste én enkelt GPX-fil som en Promise
-        function lastEnkeltopp(topp) {  // 'topp' er her et spor: { fil, type, eiere: [...] }
+        function lastEnkeltopp(topp) {
             return new Promise((resolve) => {
                 let fullført = false;
 
@@ -474,16 +471,12 @@
 
                         const typeTekst = topp.type === "vinter" ? "Vintertopp" : "Sommertopp";
                         const ikon = topp.type === "vinter" ? "❄️" : "☀️";
-                        const url = eierUrl(topp.eiere[0]);
-
-                        const tooltipHtml = topp.eiere.map(e => `<b>${eierTittel(e)}</b>`).join('<br>');
-                        const popupHtml = topp.eiere.map(e => `
-                                <b style="font-size:14px; color:#fff;">${eierTittel(e)}</b><br>
-                                <a href="${eierUrl(e)}" class="popup-link-btn">Se detaljer ➔</a>`).join('<br>');
+                        const målside = topp.type === "sommer" ? "sommer.html" : "vinter.html";
+                        const url = `${målside}?fjell=${encodeURIComponent(topp.navn)}`;
 
                         if (!isTouchDevice) {
                             layer.bindTooltip(`
-                                ${tooltipHtml}<br>
+                                <b>${topp.navn}</b><br>
                                 <span style="font-size:11px; color:#aaa; font-weight:normal;">${ikon} ${typeTekst}</span>
                             `, {
                                 sticky: true,
@@ -507,8 +500,9 @@
                             });
                         } else {
                             layer.bindPopup(`
-                                ${popupHtml}<br>
-                                <span style="font-size:11px; color:#aaa;">${ikon} ${typeTekst}</span>
+                                <b style="font-size:14px; color:#fff;">${topp.navn}</b><br>
+                                <span style="font-size:11px; color:#aaa;">${ikon} ${typeTekst}</span><br>
+                                <a href="${url}" class="popup-link-btn">Se detaljer ➔</a>
                             `, { closeButton: false, offset: [0, -5], className: 'mountain-popup' });
 
                             layer.on('popupopen', function() {
@@ -537,12 +531,13 @@
 
         async function initialiserKart() {
             const [vinterTopper, sommerTopper] = await Promise.all([
-                hentTopper('vinter_topper.json', 'vinter'),
+                hentTopper('vinter.html', 'vinter'),
                 hentTopper('sommer_topper.json', 'sommer')
             ]);
 
-            // Alle unike GPX-spor: hovedspor og ekstraspor fra begge JSON-filene
-            const alleTopper = byggSporliste([...vinterTopper, ...sommerTopper]);
+            const unikeTopperMap = new Map();
+            [...vinterTopper, ...sommerTopper].forEach(t => unikeTopperMap.set(t.fil, t));
+            const alleTopper = Array.from(unikeTopperMap.values());
 
             totalFiles = alleTopper.length;
 
@@ -552,7 +547,7 @@
                 return;
             }
 
-            document.getElementById('loading-text').textContent = `Laster inn spor... 0/${totalFiles}`;
+            document.getElementById('loading-text').textContent = `Laster inn hovedspor... 0/${totalFiles}`;
 
             // BATCHET KØ-HÅNDTERING: Laster i puljer på 4 for å hindre at mobiler fryser
             const batchSize = isTouchDevice ? 4 : 10;
