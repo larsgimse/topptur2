@@ -441,134 +441,97 @@
                 zoomTilAktiveSpor();
                 const statusEl = document.getElementById('loading-status');
                 if (statusEl) {
-                    const visningstid = feilede.length ? 6000 : 0;
-                    if (feilede.length) {
-                        document.getElementById('loading-text').textContent =
-                            `${feilede.length} spor kunne ikke lastes (se konsollen for filnavn)`;
-                        console.warn('Spor som feilet:', feilede);
-                    }
-                    setTimeout(() => {
-                        statusEl.style.opacity = '0';
-                        setTimeout(() => { if (statusEl) statusEl.remove(); }, 500);
-                    }, visningstid);
+                    statusEl.style.opacity = '0';
+                    setTimeout(() => { if (statusEl) statusEl.remove(); }, 500);
                 }
             }
         }
 
-        const GPX_TIMEOUT_MS = 20000;   // maks ventetid per GPX-fil
-        const feilede = [];             // filer som ikke lot seg laste
-
-        // Kobler tooltip/popup/klikk på et innlastet spor
-        function leggTilInteraksjon(layer, topp) {
-            const typeTekst = topp.type === "vinter" ? "Vintertopp" : "Sommertopp";
-            const ikon = topp.type === "vinter" ? "❄️" : "☀️";
-            const url = eierUrl(topp.eiere[0]);
-
-            const tooltipHtml = topp.eiere.map(e => `<b>${eierTittel(e)}</b>`).join('<br>');
-            const popupHtml = topp.eiere.map(e => `
-                    <b style="font-size:14px; color:#fff;">${eierTittel(e)}</b><br>
-                    <a href="${eierUrl(e)}" class="popup-link-btn">Se detaljer ➔</a>`).join('<br>');
-
-            if (!isTouchDevice) {
-                layer.bindTooltip(`
-                    ${tooltipHtml}<br>
-                    <span style="font-size:11px; color:#aaa; font-weight:normal;">${ikon} ${typeTekst}</span>
-                `, {
-                    sticky: true,
-                    className: 'track-tooltip',
-                    direction: 'top',
-                    offset: [0, -10]
-                });
-
-                layer.on('mouseover', function() {
-                    layer.setStyle({ color: 'var(--highlight-orange)', weight: 4.0, opacity: 1.0 });
-                    layer.bringToFront();
-                });
-
-                layer.on('mouseout', function() {
-                    layer.setStyle({ color: '#ffffff', weight: 1.4, opacity: 0.4 });
-                    layer.closeTooltip();
-                });
-
-                layer.on('click', function() {
-                    window.location.href = url;
-                });
-            } else {
-                layer.bindPopup(`
-                    ${popupHtml}<br>
-                    <span style="font-size:11px; color:#aaa;">${ikon} ${typeTekst}</span>
-                `, { closeButton: false, offset: [0, -5], className: 'mountain-popup' });
-
-                layer.on('popupopen', function() {
-                    layer.setStyle({ color: 'var(--highlight-orange)', opacity: 1.0, weight: 3.0 });
-                });
-                layer.on('popupclose', function() {
-                    layer.setStyle({ color: '#ffffff', opacity: 0.4, weight: 1.4 });
-                });
-            }
-        }
-
-        // Laster én GPX-fil. Resolver ALLTID (også ved 404, ugyldig XML, feil i handler eller timeout),
-        // slik at én dårlig fil aldri kan stoppe resten av køen.
+        // Hjelpefunksjon for å laste én enkelt GPX-fil som en Promise
         function lastEnkeltopp(topp) {  // 'topp' er her et spor: { fil, type, eiere: [...] }
             return new Promise((resolve) => {
                 let fullført = false;
-                const controller = new AbortController();
 
-                const ferdig = (feil) => {
-                    if (fullført) return;
-                    fullført = true;
-                    clearTimeout(timer);
-                    if (feil) {
-                        feilede.push(topp.fil);
-                        console.warn(`GPX-spor hoppet over: gpx/${topp.fil} – ${feil}`);
+                const tryNext = () => {
+                    if (!fullført) {
+                        fullført = true;
+                        sjekkFremdrift();
+                        resolve();
                     }
-                    sjekkFremdrift();
-                    resolve();
                 };
 
-                const timer = setTimeout(() => {
-                    controller.abort();
-                    ferdig('tidsavbrudd');
-                }, GPX_TIMEOUT_MS);
+                try {
+                    const track = new L.GPX('gpx/' + topp.fil, gpxOptions);
+                    
+                    track.on('loaded', function(e) {
+                        const layer = e.target;
+                        lagredeSpor.push({ layer: layer, type: topp.type });
 
-                (async () => {
-                    try {
-                        // Vi henter filen selv (fetch), fordi leaflet-gpx 1.7.0 ikke melder
-                        // fra ved 404 / ugyldig XML – da hang lastingen for alltid.
-                        const res = await fetch('gpx/' + topp.fil, { signal: controller.signal });
-                        if (!res.ok) { ferdig(`HTTP ${res.status}`); return; }
+                        const gpxBounds = layer.getBounds();
+                        if (gpxBounds.isValid()) {
+                            bounds.extend(gpxBounds);
+                        }
 
-                        const tekst = (await res.text()).replace(/^\uFEFF/, '').trim();
-                        // L.GPX tolker strenger som ikke starter med "<" som en URL, så vi sjekker først
-                        if (!tekst.startsWith('<')) { ferdig('ikke gyldig XML/GPX'); return; }
+                        const typeTekst = topp.type === "vinter" ? "Vintertopp" : "Sommertopp";
+                        const ikon = topp.type === "vinter" ? "❄️" : "☀️";
+                        const url = eierUrl(topp.eiere[0]);
 
-                        const track = new L.GPX(tekst, gpxOptions);
+                        const tooltipHtml = topp.eiere.map(e => `<b>${eierTittel(e)}</b>`).join('<br>');
+                        const popupHtml = topp.eiere.map(e => `
+                                <b style="font-size:14px; color:#fff;">${eierTittel(e)}</b><br>
+                                <a href="${eierUrl(e)}" class="popup-link-btn">Se detaljer ➔</a>`).join('<br>');
 
-                        track.on('loaded', function(e) {
-                            try {
-                                const layer = e.target;
-                                lagredeSpor.push({ layer: layer, type: topp.type });
+                        if (!isTouchDevice) {
+                            layer.bindTooltip(`
+                                ${tooltipHtml}<br>
+                                <span style="font-size:11px; color:#aaa; font-weight:normal;">${ikon} ${typeTekst}</span>
+                            `, {
+                                sticky: true,
+                                className: 'track-tooltip',
+                                direction: 'top',
+                                offset: [0, -10]
+                            });
 
-                                const gpxBounds = layer.getBounds();
-                                if (gpxBounds.isValid()) bounds.extend(gpxBounds);
+                            layer.on('mouseover', function() {
+                                layer.setStyle({ color: 'var(--highlight-orange)', weight: 4.0, opacity: 1.0 });
+                                layer.bringToFront();
+                            });
 
-                                leggTilInteraksjon(layer, topp);
-                                ferdig();
-                            } catch (err) {
-                                ferdig('feil ved oppsett: ' + err.message);
-                            }
-                        });
+                            layer.on('mouseout', function() {
+                                layer.setStyle({ color: '#ffffff', weight: 1.4, opacity: 0.4 });
+                                layer.closeTooltip();
+                            });
 
-                        track.on('error', function(e) {
-                            ferdig('GPX-parsing feilet' + (e && e.err ? ': ' + e.err : ''));
-                        });
+                            layer.on('click', function() {
+                                window.location.href = url;
+                            });
+                        } else {
+                            layer.bindPopup(`
+                                ${popupHtml}<br>
+                                <span style="font-size:11px; color:#aaa;">${ikon} ${typeTekst}</span>
+                            `, { closeButton: false, offset: [0, -5], className: 'mountain-popup' });
 
-                        track.addTo(map);
-                    } catch (err) {
-                        ferdig(err.name === 'AbortError' ? 'tidsavbrudd' : err.message);
-                    }
-                })();
+                            layer.on('popupopen', function() {
+                                layer.setStyle({ color: 'var(--highlight-orange)', opacity: 1.0, weight: 3.0 });
+                            });
+                            layer.on('popupclose', function() {
+                                layer.setStyle({ color: '#ffffff', opacity: 0.4, weight: 1.4 });
+                            });
+                        }
+                        
+                        tryNext();
+                    });
+
+                    track.on('error', function() {
+                        console.warn("Kunne ikke laste GPX-fil:", topp.fil);
+                        tryNext();
+                    });
+
+                    track.addTo(map);
+                } catch (err) {
+                    console.warn("Feil ved opprettelse av GPX-lag:", err);
+                    tryNext();
+                }
             });
         }
 
@@ -591,17 +554,12 @@
 
             document.getElementById('loading-text').textContent = `Laster inn spor... 0/${totalFiles}`;
 
-            // KØ-HÅNDTERING: Fast antall samtidige nedlastinger (færre på mobil).
-            // Nye filer starter så snart en er ferdig, og en fil som feiler stopper ikke resten.
-            const samtidige = isTouchDevice ? 4 : 10;
-            let neste = 0;
-            const arbeider = async () => {
-                while (neste < alleTopper.length) {
-                    const spor = alleTopper[neste++];
-                    await lastEnkeltopp(spor);
-                }
-            };
-            await Promise.all(Array.from({ length: Math.min(samtidige, alleTopper.length) }, arbeider));
+            // BATCHET KØ-HÅNDTERING: Laster i puljer på 4 for å hindre at mobiler fryser
+            const batchSize = isTouchDevice ? 4 : 10;
+            for (let i = 0; i < alleTopper.length; i += batchSize) {
+                const batch = alleTopper.slice(i, i + batchSize);
+                await Promise.all(batch.map(topp => lastEnkeltopp(topp)));
+            }
         }
 
         initialiserKart();
